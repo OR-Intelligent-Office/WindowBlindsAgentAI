@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WindowBlindsAgentAI - blinds agent with AI.
+WindowBlindsAgentAI - agent rolet okiennych z integracją AI.
 
 Funkcje:
 - Pobiera stan środowiska z symulatora
@@ -33,7 +33,6 @@ logger = logging.getLogger("WindowBlindsAgentAI")
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-
 class BlindsAgentAI:
     """Blinds agent with AI (Ollama)."""
     
@@ -49,7 +48,7 @@ class BlindsAgentAI:
         self.model = model
         self.ollama_base_url = ollama_base_url
         
-        # Configuration
+        # Konfiguracja
         self.poll_interval = 2.0  # sekundy
         
         # AI Configuration
@@ -84,7 +83,7 @@ class BlindsAgentAI:
         logger.info("WindowBlindsAgentAI stopped")
     
     async def get_state(self) -> dict | None:
-        """Gets environment state from simulator."""
+        """Gets the state of the environment from the simulator."""
         try:
             async with self.session.get(f"{self.simulator_url}/api/environment/state") as resp:
                 if resp.status == 200:
@@ -93,11 +92,10 @@ class BlindsAgentAI:
                     logger.error(f"Error getting state: {resp.status}")
                     return None
         except Exception as e:
-            logger.error(f"Error connecting: {e}")
+            logger.error(f"Connection error: {e}")
             return None
     
     async def set_blinds(self, blinds_id: str, state: str) -> bool:
-        """Sets blinds state."""
         try:
             payload = {"state": state}
             url = f"{self.simulator_url}/api/environment/devices/blinds/{blinds_id}/control"
@@ -107,14 +105,13 @@ class BlindsAgentAI:
                     result = await resp.json()
                     return result.get("success", False)
                 else:
-                    logger.error(f"Error controlling {blinds_id}: {resp.status}")
+                    logger.error(f"Error setting blinds {blinds_id}: {resp.status}")
                     return False
         except Exception as e:
-            logger.error(f"Error sending: {e}")
+            logger.error(f"Error sending request: {e}")
             return False
     
     def _create_ai_prompt(self, room: dict, state: dict) -> str:
-        """Creates prompt for AI with room context and environment."""
         room_name = room.get("name", "Unknown")
         people_count = room.get("peopleCount", 0)
         blinds = room.get("blinds", {})
@@ -132,10 +129,10 @@ class BlindsAgentAI:
         
         meetings = room.get("scheduledMeetings", [])
         
-        prompt = f"""You are an intelligent window blinds management system for an office building.
+        prompt = f"""You are an intelligent system for managing window blinds in an office building.
 
-ROOM CONTEXT: {room_name}
-- Number of people in room: {people_count}
+CONTEXT OF THE ROOM: {room_name}
+- Number of people in the room: {people_count}
 - Current blinds state: {current_blinds_state}
 - Lights on: {lights_on}
 - Room temperature: {room_temp}°C (if available)
@@ -144,26 +141,27 @@ ROOM CONTEXT: {room_name}
 - Power outage: {power_outage}
 - Scheduled meetings: {len(meetings)} meetings
 
-RULES:
+DECISION HIERARCHY (apply in order, stop at first match):
 1. Power outage: OPEN blinds ONLY if there are people in the room (for safety)
 2. Lights on: CLOSE blinds (energy saving)
-3. Day + people in room: OPEN blinds (natural light)
-4. Day + no people + high external temperature: CLOSE blinds (heat protection)
-5. Night: CLOSE blinds (security)
-6. Twilight: maintain current state or close for security
+3. Day + people in the room: OPEN blinds (natural light)
+4. Day + no people + high external temperature (>28°C): CLOSE blinds (heat protection)
+5. Night: CLOSE blinds (safety)
+6. Dusk: keep current state or close for safety
 
-Respond in format: DECISION - REASON
+IMPORTANT: Return ONLY ONE decision following the hierarchy above. Do NOT provide multiple options or "OR" alternatives.
+
+Answer in format: DECISION - REASON
 Where DECISION is OPEN or CLOSED, and REASON is a short explanation (max 20 characters).
-Example: "OPEN - day, people present" or "CLOSED - night, security"."""
+Example: "OPEN - day, people present" or "CLOSED - night, safety"."""
 
         return prompt
     
     async def _ask_ai(self, prompt: str) -> Optional[tuple[str, str]]:
-        """Ask AI for decision - uses Ollama."""
         if not self.use_ai:
             return None
         
-        system_prompt = "You are an expert in energy management and comfort in office buildings. Respond in format: DECISION - REASON (e.g. 'OPEN - day, people present' or 'CLOSED - night, security')."
+        system_prompt = "You are the expert in energy management and comfort in office buildings. Answer in the format: DECISION - REASON (e.g. 'OPEN - day, people in the room' or 'CLOSED - night, safety')."
         
         try:
             async with httpx.AsyncClient() as client:
@@ -176,105 +174,108 @@ Example: "OPEN - day, people present" or "CLOSED - night, security"."""
                             {"role": "user", "content": prompt}
                         ],
                         "options": {"temperature": 0.3},
-                        "stream": False  # Disable streaming for simpler handling
+                        "stream": False
                     },
                     timeout=30.0
                 )
                 response.raise_for_status()
                 
-                # Ollama may return streaming JSON (each line is a separate JSON)
-                # or single JSON. We handle both cases.
+                # Ollama może zwracać streaming JSON (każda linia to osobny JSON)
+                # lub pojedynczy JSON. Obsługujemy oba przypadki.
                 text = response.text.strip()
                 
-                # Try to parse as single JSON
+                # Spróbuj parsować jako pojedynczy JSON
                 try:
                     result = response.json()
                     ai_response = result["message"]["content"].strip()
                 except Exception:
-                    # If still not working, it might be streaming - take the last line
+                    # Jeśli to nie działa, może być streaming - weź ostatnią linię
                     lines = text.split('\n')
                     last_line = lines[-1] if lines else text
                     try:
                         result = json.loads(last_line)
                         ai_response = result["message"]["content"].strip()
                     except Exception:
-                        # If still not working, try to extract text directly
-                        # Sometimes Ollama returns only text without JSON
+                        # Jeśli nadal nie działa, spróbuj wyciągnąć tekst bezpośrednio
+                        # Czasami Ollama zwraca tylko tekst bez JSON
                         ai_response = text.strip()
-                        # Remove any JSON characters
+                        # Usuń ewentualne znaki JSON
                         if ai_response.startswith('{'):
-                            # Try to extract content from JSON
+                            # Spróbuj wyciągnąć content z JSON
                             import re
                             match = re.search(r'"content"\s*:\s*"([^"]+)"', ai_response)
                             if match:
                                 ai_response = match.group(1).strip()
             
-            # Parse response: "DECISION - REASON" or just "DECISION"
-            # AI may return multiple lines - extract only the line with DECISION
-            logger.debug(f"Response from Ollama (raw): {ai_response[:300]}")
+            # Parsuj odpowiedź: "DECYZJA - POWÓD" lub tylko "DECYZJA"
+            # Usuń wszystko po "OR" lub po drugiej opcji
+            if "\n\nOR\n\n" in ai_response.upper() or "\nOR\n" in ai_response.upper():
+                # Weź tylko pierwszą część przed "OR"
+                ai_response = ai_response.split("\n\nOR\n\n")[0].split("\nOR\n")[0]
             
-            # Split into lines and find the first line with OPEN or CLOSED
-            lines = ai_response.strip().split('\n')
+            # Podziel na linie i znajdź pierwszą linię z decyzją
+            lines = [line.strip() for line in ai_response.split('\n') if line.strip()]
             decision_line = None
-            for line in lines:
-                line_upper = line.upper().strip()
-                # Skip headers like "DECISION - REASON" and find actual decision
-                if ("OPEN" in line_upper or "CLOSED" in line_upper) and not line_upper.startswith("DECISION") and not line_upper.startswith("REASON"):
-                    decision_line = line.strip()
-                    break
             
-            # If not found in lines, use the whole response
+            for line in lines:
+                line_upper = line.upper()
+                # Pomiń nagłówki i szukaj pierwszej linii z OPEN lub CLOSED
+                if not line_upper.startswith("REASON") and not line_upper.startswith("DECISION"):
+                    if "OPEN" in line_upper and "CLOSED" not in line_upper:
+                        decision_line = line
+                        break
+                    elif "CLOSED" in line_upper:
+                        decision_line = line
+                        break
+            
+            # Jeśli nie znaleziono w liniach, użyj całej odpowiedzi
             if not decision_line:
                 decision_line = ai_response.strip()
             
-            ai_response_upper = decision_line.upper()
-            if "OPEN" in ai_response_upper:
+            # Wyciągnij decyzję i powód
+            decision_line_upper = decision_line.upper()
+            if "OPEN" in decision_line_upper and "CLOSED" not in decision_line_upper:
                 decision = "OPEN"
-                # Extract reason if it exists
+                # Wyciągnij powód
                 if " - " in decision_line:
                     reason = decision_line.split(" - ", 1)[1].strip()
-                    # Remove additional info if present
-                    if "\n" in reason:
-                        reason = reason.split("\n")[0].strip()
-                    # Remove extra text after reason
-                    reason = reason.split("REASON")[0].strip() if "REASON" in reason else reason
-                elif ":" in decision_line:
+                    # Usuń wszystko po "Reason:" lub po kropce jeśli jest długa
+                    if "Reason:" in reason:
+                        reason = reason.split("Reason:")[0].strip()
+                    # Weź tylko pierwsze 20-30 znaków
+                    if len(reason) > 30:
+                        reason = reason[:30].strip()
+                elif ":" in decision_line and not decision_line.upper().startswith("DECISION"):
                     reason = decision_line.split(":", 1)[1].strip()
-                    if "\n" in reason:
-                        reason = reason.split("\n")[0].strip()
+                    if len(reason) > 30:
+                        reason = reason[:30].strip()
                 else:
-                    reason = "AI decision"
-                logger.debug(f"Recognized decision: {decision}, reason: {reason}")
+                    reason = "day, people present"
                 return (decision, reason)
-            elif "CLOSED" in ai_response_upper:
+            elif "CLOSED" in decision_line_upper:
                 decision = "CLOSED"
-                # Extract reason if it exists
+                # Wyciągnij powód
                 if " - " in decision_line:
                     reason = decision_line.split(" - ", 1)[1].strip()
-                    # Remove additional info if present
-                    if "\n" in reason:
-                        reason = reason.split("\n")[0].strip()
-                    # Remove extra text after reason
-                    reason = reason.split("REASON")[0].strip() if "REASON" in reason else reason
-                elif ":" in decision_line:
+                    # Usuń wszystko po "Reason:" lub po kropce jeśli jest długa
+                    if "Reason:" in reason:
+                        reason = reason.split("Reason:")[0].strip()
+                    # Weź tylko pierwsze 20-30 znaków
+                    if len(reason) > 30:
+                        reason = reason[:30].strip()
+                elif ":" in decision_line and not decision_line.upper().startswith("DECISION"):
                     reason = decision_line.split(":", 1)[1].strip()
-                    if "\n" in reason:
-                        reason = reason.split("\n")[0].strip()
+                    if len(reason) > 30:
+                        reason = reason[:30].strip()
                 else:
-                    reason = "AI decision"
-                logger.debug(f"Recognized decision: {decision}, reason: {reason}")
+                    reason = "night, safety"
                 return (decision, reason)
             else:
-                logger.warning(f"AI provided unexpected response: {ai_response[:100]}")
+                logger.warning(f"AI returned unexpected response: {ai_response[:100]}")
                 return None
         except Exception as e:
-            error_msg = str(e) if e else "Unknown error"
-            logger.error(f"Error querying Ollama: {error_msg}")
-            if 'response' in locals():
-                logger.error(f"Response status: {response.status_code}")
-                logger.error(f"Response from Ollama (first 500 characters): {response.text[:500]}")
-            else:
-                logger.error(f"No response from Ollama - exception: {type(e).__name__}")
+            logger.error(f"Error querying Ollama: {e}")
+            logger.debug(f"Response from Ollama: {response.text[:200] if 'response' in locals() else 'N/A'}")
             return None
     
     async def should_blinds_be_open(self, room: dict, state: dict) -> Optional[tuple[bool, str]]:
@@ -283,21 +284,19 @@ Example: "OPEN - day, people present" or "CLOSED - night, security"."""
             logger.error("AI is not available. Cannot make decisions.")
             return None
         
-        room_name = room.get("name", "?")
         prompt = self._create_ai_prompt(room, state)
         ai_result = await self._ask_ai(prompt)
         
         if ai_result:
             decision, reason = ai_result
             should_open = decision == "OPEN"
-            logger.debug(f"[{room_name}] AI decision: {decision} - {reason}")
             return should_open, f"AI: {reason}"
         
-        logger.warning(f"[{room_name}] AI did not provide a decision. Skipping state change.")
+        logger.warning("AI did not provide a decision. Skipping blind state change.")
         return None
     
     async def run_cycle(self):
-        """One cycle of the agent."""
+        """One cycle of agent operation."""
         state = await self.get_state()
         if not state:
             return
@@ -328,20 +327,15 @@ Example: "OPEN - day, people present" or "CLOSED - night, security"."""
                 success = await self.set_blinds(blinds_id, "OPEN")
                 if success:
                     logger.info(f"⬆ OPENED {blinds_id} in {room_name} ({reason})")
-                else:
-                    logger.error(f"❌ Failed to open {blinds_id} in {room_name}")
             
             # Close blinds
             elif not should_be_open and current_open:
                 success = await self.set_blinds(blinds_id, "CLOSED")
                 if success:
                     logger.info(f"⬇ CLOSED {blinds_id} in {room_name} ({reason})")
-                else:
-                    logger.error(f"❌ Failed to close {blinds_id} in {room_name}")
-            
-            # State already matches AI decision
-            elif should_be_open == current_open:
-                logger.info(f"✓ {blinds_id} in {room_name} is already in the correct state ({current_state}) - {reason}")
+
+            else:
+                logger.info(f"Blinds {blinds_id} in {room_name} are already in the desired state ({reason})")
 
 async def main():
     """Main function."""
@@ -349,7 +343,7 @@ async def main():
     
     parser = argparse.ArgumentParser(description="WindowBlindsAgentAI - blinds agent with AI (Ollama)")
     parser.add_argument("simulator_url", nargs="?", default="http://localhost:8080",
-                       help="URL simulator (default: http://localhost:8080)")
+                       help="Simulator URL (default: http://localhost:8080)")
     parser.add_argument("--ollama-base-url", type=str, default="http://localhost:11434",
                        help="Ollama base URL (default: http://localhost:11434)")
     parser.add_argument("--model", type=str, default="llama2",
