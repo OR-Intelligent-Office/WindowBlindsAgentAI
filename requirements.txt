@@ -1,0 +1,4 @@
+# WindowBlindsAgentAI - agent rolet okiennych z integracją AI (Ollama)
+aiohttp>=3.9.0
+httpx>=0.25.0
+
