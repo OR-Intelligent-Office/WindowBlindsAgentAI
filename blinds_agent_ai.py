@@ -39,7 +39,8 @@ class BlindsAgentAI:
     def __init__(self, simulator_url: str = "http://localhost:8080", 
                  ollama_base_url: str = "http://localhost:11434",
                  use_ai: bool = True,
-                 model: str = "llama2"):
+                 model: str = "llama2",
+                 agent_id: str = "WindowBlindsAgent"):
         if not use_ai:
             raise ValueError("AI is required. WindowBlindsAgentAI cannot work without AI.")
         self.simulator_url = simulator_url
@@ -47,9 +48,13 @@ class BlindsAgentAI:
         self.running = False
         self.model = model
         self.ollama_base_url = ollama_base_url
+        self.agent_id = agent_id
+        self.last_message_timestamp: Optional[str] = None
         
         # Konfiguracja
         self.poll_interval = 2.0  # sekundy
+        self.message_check_interval = 3.0  # sekundy - sprawdzaj wiadomości co 3 sekundy
+        self.last_message_check = 0.0
         
         # AI Configuration
         if use_ai and OLLAMA_AVAILABLE:
@@ -66,7 +71,12 @@ class BlindsAgentAI:
     
     async def start(self):
         """Starts the agent."""
-        self.session = aiohttp.ClientSession()
+        timeout = aiohttp.ClientTimeout(
+            total=30.0,  # Total timeout: 30 seconds
+            connect=10.0,  # Connection timeout: 10 seconds
+            sock_read=30.0  # Socket read timeout: 30 seconds
+        )
+        self.session = aiohttp.ClientSession(timeout=timeout)
         self.running = True
         logger.info(f"WindowBlindsAgentAI started - {self.simulator_url}")
         
@@ -91,8 +101,14 @@ class BlindsAgentAI:
                 else:
                     logger.error(f"Error getting state: {resp.status}")
                     return None
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout connecting to simulator at {self.simulator_url}")
+            return None
+        except aiohttp.ClientConnectorError as e:
+            logger.warning(f"Cannot connect to simulator at {self.simulator_url}: {e}")
+            return None
         except Exception as e:
-            logger.error(f"Connection error: {e}")
+            logger.debug(f"Connection error: {e}")
             return None
     
     async def set_blinds(self, blinds_id: str, state: str) -> bool:
@@ -111,7 +127,57 @@ class BlindsAgentAI:
             logger.error(f"Error sending request: {e}")
             return False
     
-    def _create_ai_prompt(self, room: dict, state: dict) -> str:
+    async def send_message(self, to_agent: str, message: str, message_type: str = "INFORM") -> bool:
+        """Sends a message in natural language to another agent."""
+        try:
+            payload = {
+                "from": self.agent_id,
+                "to": to_agent,
+                "type": message_type,
+                "content": message,
+                "context": None
+            }
+            url = f"{self.simulator_url}/api/environment/agents/messages"
+            
+            async with self.session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    success = result.get("success", False)
+                    if success:
+                        logger.info(f"📤 Message sent to {to_agent}: {message[:50]}...")
+                    return success
+                else:
+                    logger.error(f"Error sending message to {to_agent}: {resp.status}")
+                    return False
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return False
+    
+    async def get_messages(self) -> list[dict]:
+        """Gets messages for this agent."""
+        try:
+            url = f"{self.simulator_url}/api/environment/agents/messages/{self.agent_id}"
+            if self.last_message_timestamp:
+                url = f"{self.simulator_url}/api/environment/agents/messages/{self.agent_id}/new?after={self.last_message_timestamp}"
+            
+            async with self.session.get(url) as resp:
+                if resp.status == 200:
+                    messages = await resp.json()
+                    if messages and isinstance(messages, list):
+                        # Update last message timestamp
+                        if messages:
+                            last_msg = max(messages, key=lambda m: m.get("timestamp", ""))
+                            self.last_message_timestamp = last_msg.get("timestamp")
+                        return messages
+                    return []
+                else:
+                    logger.debug(f"Error getting messages: {resp.status}")
+                    return []
+        except Exception as e:
+            logger.debug(f"Error getting messages: {e}")
+            return []
+    
+    def _create_ai_prompt(self, room: dict, state: dict, received_messages: list[dict] = None) -> str:
         room_name = room.get("name", "Unknown")
         people_count = room.get("peopleCount", 0)
         blinds = room.get("blinds", {})
@@ -129,6 +195,15 @@ class BlindsAgentAI:
         
         meetings = room.get("scheduledMeetings", [])
         
+        # Add messages context if any
+        messages_context = ""
+        if received_messages:
+            messages_text = "\n".join([
+                f"- From {msg.get('from', '?')}: {msg.get('content', '')[:100]}"
+                for msg in received_messages[:3]  # Max 3 recent messages
+            ])
+            messages_context = f"\n\nRECEIVED MESSAGES FROM OTHER AGENTS:\n{messages_text}\n"
+        
         prompt = f"""You are an intelligent system for managing window blinds in an office building.
 
 CONTEXT OF THE ROOM: {room_name}
@@ -139,7 +214,7 @@ CONTEXT OF THE ROOM: {room_name}
 - External temperature: {external_temp}°C
 - Daylight intensity: {daylight:.2f} (0.0 = night, 1.0 = full sun)
 - Power outage: {power_outage}
-- Scheduled meetings: {len(meetings)} meetings
+- Scheduled meetings: {len(meetings)} meetings{messages_context}
 
 DECISION HIERARCHY (apply in order, stop at first match):
 1. Power outage: OPEN blinds ONLY if there are people in the room (for safety)
@@ -150,6 +225,9 @@ DECISION HIERARCHY (apply in order, stop at first match):
 6. Dusk: keep current state or close for safety
 
 IMPORTANT: Return ONLY ONE decision following the hierarchy above. Do NOT provide multiple options or "OR" alternatives.
+
+If you decide to CLOSE blinds due to high external temperature (>28°C), you should also inform the HeatingAgent about heat protection needs.
+If you decide to OPEN blinds for natural light, you might inform HeatingAgent to reduce heating if temperature is high.
 
 Answer in format: DECISION - REASON
 Where DECISION is OPEN or CLOSED, and REASON is a short explanation (max 20 characters).
@@ -278,25 +356,127 @@ Example: "OPEN - day, people present" or "CLOSED - night, safety"."""
             logger.debug(f"Response from Ollama: {response.text[:200] if 'response' in locals() else 'N/A'}")
             return None
     
-    async def should_blinds_be_open(self, room: dict, state: dict) -> Optional[tuple[bool, str]]:
+    async def should_blinds_be_open(self, room: dict, state: dict, received_messages: list[dict] = None) -> Optional[tuple[bool, str]]:
         """Decides if blinds should be open (uses only AI)."""
         if not self.use_ai:
             logger.error("AI is not available. Cannot make decisions.")
             return None
         
-        prompt = self._create_ai_prompt(room, state)
+        prompt = self._create_ai_prompt(room, state, received_messages)
         ai_result = await self._ask_ai(prompt)
         
         if ai_result:
             decision, reason = ai_result
             should_open = decision == "OPEN"
+            
+            # Automatically send messages to other agents in certain situations
+            await self._send_notification_messages(room, state, decision, reason)
+            
             return should_open, f"AI: {reason}"
         
         logger.warning("AI did not provide a decision. Skipping blind state change.")
         return None
     
+    async def _send_notification_messages(self, room: dict, state: dict, decision: str, reason: str):
+        """Sends notification messages to other agents when appropriate."""
+        external_temp = state.get("externalTemperature", 20.0)
+        room_temp = room.get("temperatureSensor", {}).get("temperature") if room.get("temperatureSensor") else None
+        room_name = room.get("name", "Unknown")
+        
+        # If closing blinds due to high temperature, inform HeatingAgent
+        if decision == "CLOSED" and external_temp > 28.0:
+            message = f"Closed blinds in {room_name} due to high external temperature ({external_temp:.1f}°C) for heat protection."
+            await self.send_message("HeatingAgent", message, "INFORM")
+        
+        # If opening blinds for natural light and temperature is high, suggest reducing heating
+        elif decision == "OPEN" and "day" in reason.lower() and room_temp and room_temp > 23.0:
+            message = f"Opened blinds in {room_name} for natural light. Room temperature is {room_temp:.1f}°C - consider reducing heating."
+            await self.send_message("HeatingAgent", message, "INFORM")
+    
+    async def _check_and_process_messages(self):
+        """Checks for new messages and processes them."""
+        import time
+        current_time = time.time()
+        
+        # Check messages periodically
+        if current_time - self.last_message_check >= self.message_check_interval:
+            self.last_message_check = current_time
+            messages = await self.get_messages()
+            
+            if messages:
+                for message in messages:
+                    if message.get("to") == self.agent_id or message.get("to") == "broadcast":
+                        logger.info(f"📨 Received message from {message.get('from', '?')}: {message.get('content', '')[:100]}")
+                        await self._process_message(message)
+    
+    async def _process_message(self, message: dict):
+        """Processes a received message using AI."""
+        from_agent = message.get("from", "?")
+        content = message.get("content", "")
+        message_type = message.get("type", "INFORM")
+        
+        # Get current state
+        state = await self.get_state()
+        if not state:
+            return
+        
+        # Create prompt for message processing
+        prompt = f"""You are a window blinds management agent. You received a message from another agent.
+
+MESSAGE:
+From: {from_agent}
+Type: {message_type}
+Content: "{content}"
+
+CURRENT ENVIRONMENT:
+- External temperature: {state.get('externalTemperature', 20.0)}°C
+- Daylight intensity: {state.get('daylightIntensity', 1.0):.2f}
+- Power outage: {state.get('powerOutage', False)}
+- Rooms with blinds: {len([r for r in state.get('rooms', []) if r.get('blinds')])}
+
+Analyze the message and decide if you should:
+1. Change blinds state based on the message
+2. Send a response message back
+
+If the message is about high temperature or heat protection, you might need to CLOSE blinds.
+If the message is about low temperature or heating, you might need to OPEN blinds for natural light.
+
+Answer in format: DECISION - REASON
+Where DECISION is OPEN or CLOSED, and REASON references the message.
+Example: "CLOSED - high temp from HeatingAgent" or "OPEN - heating request"."""
+
+        # Ask AI for decision based on message
+        ai_result = await self._ask_ai(prompt)
+        
+        if ai_result:
+            decision, reason = ai_result
+            should_open = decision == "OPEN"
+            
+            # Apply decision to all rooms with blinds
+            rooms = state.get("rooms", [])
+            for room in rooms:
+                blinds = room.get("blinds")
+                if not blinds:
+                    continue
+                
+                blinds_id = blinds.get("id", "")
+                current_state = blinds.get("state", "CLOSED")
+                current_open = current_state == "OPEN"
+                
+                if should_open and not current_open:
+                    success = await self.set_blinds(blinds_id, "OPEN")
+                    if success:
+                        logger.info(f"⬆ OPENED {blinds_id} in {room.get('name', '?')} (message from {from_agent}: {reason})")
+                elif not should_open and current_open:
+                    success = await self.set_blinds(blinds_id, "CLOSED")
+                    if success:
+                        logger.info(f"⬇ CLOSED {blinds_id} in {room.get('name', '?')} (message from {from_agent}: {reason})")
+    
     async def run_cycle(self):
         """One cycle of agent operation."""
+        # Check for messages first
+        await self._check_and_process_messages()
+        
         state = await self.get_state()
         if not state:
             return
@@ -314,6 +494,7 @@ Example: "OPEN - day, people present" or "CLOSED - night, safety"."""
             current_state = blinds.get("state", "CLOSED")
             current_open = current_state == "OPEN"
             
+            # Regular decision cycle (messages are already processed in _check_and_process_messages)
             decision = await self.should_blinds_be_open(room, state)
             
             if decision is None:
