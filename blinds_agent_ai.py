@@ -20,6 +20,7 @@ from typing import Optional
 # Import Ollama client
 try:
     import httpx
+
     OLLAMA_AVAILABLE = True
 except ImportError:
     OLLAMA_AVAILABLE = False
@@ -33,10 +34,11 @@ logger = logging.getLogger("WindowBlindsAgentAI")
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+
 class BlindsAgentAI:
     """Blinds agent with AI (Ollama)."""
-    
-    def __init__(self, simulator_url: str = "http://localhost:8080", 
+
+    def __init__(self, simulator_url: str = "http://localhost:8080",
                  ollama_base_url: str = "http://localhost:11434",
                  use_ai: bool = True,
                  model: str = "llama2",
@@ -50,12 +52,12 @@ class BlindsAgentAI:
         self.ollama_base_url = ollama_base_url
         self.agent_id = agent_id
         self.last_message_timestamp: Optional[str] = None
-        
+
         # Konfiguracja
         self.poll_interval = 2.0  # sekundy
         self.message_check_interval = 3.0  # sekundy - sprawdzaj wiadomości co 3 sekundy
         self.last_message_check = 0.0
-        
+
         # AI Configuration
         if use_ai and OLLAMA_AVAILABLE:
             self.use_ai = True
@@ -68,7 +70,7 @@ class BlindsAgentAI:
             if not use_ai:
                 logger.error("AI is disabled. Agent cannot function without AI.")
                 raise RuntimeError("AI is required. Do not use --no-ai flag.")
-    
+
     async def start(self):
         """Starts the agent."""
         timeout = aiohttp.ClientTimeout(
@@ -79,19 +81,19 @@ class BlindsAgentAI:
         self.session = aiohttp.ClientSession(timeout=timeout)
         self.running = True
         logger.info(f"WindowBlindsAgentAI started - {self.simulator_url}")
-        
+
         try:
             while self.running:
                 await self.run_cycle()
                 await asyncio.sleep(self.poll_interval)
         finally:
             await self.session.close()
-    
+
     def stop(self):
         """Stops the agent."""
         self.running = False
         logger.info("WindowBlindsAgentAI stopped")
-    
+
     async def get_state(self) -> dict | None:
         """Gets the state of the environment from the simulator."""
         try:
@@ -110,12 +112,12 @@ class BlindsAgentAI:
         except Exception as e:
             logger.debug(f"Connection error: {e}")
             return None
-    
+
     async def set_blinds(self, blinds_id: str, state: str) -> bool:
         try:
             payload = {"state": state}
             url = f"{self.simulator_url}/api/environment/devices/blinds/{blinds_id}/control"
-            
+
             async with self.session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -126,7 +128,7 @@ class BlindsAgentAI:
         except Exception as e:
             logger.error(f"Error sending request: {e}")
             return False
-    
+
     async def send_message(self, to_agent: str, message: str, message_type: str = "INFORM") -> bool:
         """Sends a message in natural language to another agent."""
         try:
@@ -138,7 +140,7 @@ class BlindsAgentAI:
                 "context": None
             }
             url = f"{self.simulator_url}/api/environment/agents/messages"
-            
+
             async with self.session.post(url, json=payload) as resp:
                 if resp.status == 200:
                     result = await resp.json()
@@ -152,14 +154,14 @@ class BlindsAgentAI:
         except Exception as e:
             logger.error(f"Error sending message: {e}")
             return False
-    
+
     async def get_messages(self) -> list[dict]:
         """Gets messages for this agent."""
         try:
             url = f"{self.simulator_url}/api/environment/agents/messages/{self.agent_id}"
             if self.last_message_timestamp:
                 url = f"{self.simulator_url}/api/environment/agents/messages/{self.agent_id}/new?after={self.last_message_timestamp}"
-            
+
             async with self.session.get(url) as resp:
                 if resp.status == 200:
                     messages = await resp.json()
@@ -176,25 +178,25 @@ class BlindsAgentAI:
         except Exception as e:
             logger.debug(f"Error getting messages: {e}")
             return []
-    
+
     def _create_ai_prompt(self, room: dict, state: dict, received_messages: list[dict] = None) -> str:
         room_name = room.get("name", "Unknown")
         people_count = room.get("peopleCount", 0)
         blinds = room.get("blinds", {})
         current_blinds_state = blinds.get("state", "CLOSED")
-        
+
         lights = room.get("lights", [])
         lights_on = any(light.get("state") == "ON" for light in lights)
-        
+
         temp_sensor = room.get("temperatureSensor", {})
         room_temp = temp_sensor.get("temperature") if temp_sensor else None
-        
+
         daylight = state.get("daylightIntensity", 1.0)
         external_temp = state.get("externalTemperature", 20.0)
         power_outage = state.get("powerOutage", False)
-        
+
         meetings = room.get("scheduledMeetings", [])
-        
+
         # Add messages context if any
         messages_context = ""
         if received_messages:
@@ -203,7 +205,7 @@ class BlindsAgentAI:
                 for msg in received_messages[:3]  # Max 3 recent messages
             ])
             messages_context = f"\n\nRECEIVED MESSAGES FROM OTHER AGENTS:\n{messages_text}\n"
-        
+
         prompt = f"""You are an intelligent system for managing window blinds in an office building.
 
 CONTEXT OF THE ROOM: {room_name}
@@ -234,13 +236,13 @@ Where DECISION is OPEN or CLOSED, and REASON is a short explanation (max 20 char
 Example: "OPEN - day, people present" or "CLOSED - night, safety"."""
 
         return prompt
-    
+
     async def _ask_ai(self, prompt: str) -> Optional[tuple[str, str]]:
         if not self.use_ai:
             return None
-        
+
         system_prompt = "You are the expert in energy management and comfort in office buildings. Answer in the format: DECISION - REASON (e.g. 'OPEN - day, people in the room' or 'CLOSED - night, safety')."
-        
+
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -257,11 +259,11 @@ Example: "OPEN - day, people present" or "CLOSED - night, safety"."""
                     timeout=30.0
                 )
                 response.raise_for_status()
-                
+
                 # Ollama może zwracać streaming JSON (każda linia to osobny JSON)
                 # lub pojedynczy JSON. Obsługujemy oba przypadki.
                 text = response.text.strip()
-                
+
                 # Spróbuj parsować jako pojedynczy JSON
                 try:
                     result = response.json()
@@ -284,17 +286,17 @@ Example: "OPEN - day, people present" or "CLOSED - night, safety"."""
                             match = re.search(r'"content"\s*:\s*"([^"]+)"', ai_response)
                             if match:
                                 ai_response = match.group(1).strip()
-            
+
             # Parsuj odpowiedź: "DECYZJA - POWÓD" lub tylko "DECYZJA"
             # Usuń wszystko po "OR" lub po drugiej opcji
             if "\n\nOR\n\n" in ai_response.upper() or "\nOR\n" in ai_response.upper():
                 # Weź tylko pierwszą część przed "OR"
                 ai_response = ai_response.split("\n\nOR\n\n")[0].split("\nOR\n")[0]
-            
+
             # Podziel na linie i znajdź pierwszą linię z decyzją
             lines = [line.strip() for line in ai_response.split('\n') if line.strip()]
             decision_line = None
-            
+
             for line in lines:
                 line_upper = line.upper()
                 # Pomiń nagłówki i szukaj pierwszej linii z OPEN lub CLOSED
@@ -305,11 +307,11 @@ Example: "OPEN - day, people present" or "CLOSED - night, safety"."""
                     elif "CLOSED" in line_upper:
                         decision_line = line
                         break
-            
+
             # Jeśli nie znaleziono w liniach, użyj całej odpowiedzi
             if not decision_line:
                 decision_line = ai_response.strip()
-            
+
             # Wyciągnij decyzję i powód
             decision_line_upper = decision_line.upper()
             if "OPEN" in decision_line_upper and "CLOSED" not in decision_line_upper:
@@ -355,71 +357,257 @@ Example: "OPEN - day, people present" or "CLOSED - night, safety"."""
             logger.error(f"Error querying Ollama: {e}")
             logger.debug(f"Response from Ollama: {response.text[:200] if 'response' in locals() else 'N/A'}")
             return None
-    
-    async def should_blinds_be_open(self, room: dict, state: dict, received_messages: list[dict] = None) -> Optional[tuple[bool, str]]:
+
+    async def should_blinds_be_open(self, room: dict, state: dict, received_messages: list[dict] = None) -> Optional[
+        tuple[bool, str]]:
         """Decides if blinds should be open (uses only AI)."""
         if not self.use_ai:
             logger.error("AI is not available. Cannot make decisions.")
             return None
-        
+
         prompt = self._create_ai_prompt(room, state, received_messages)
         ai_result = await self._ask_ai(prompt)
-        
+
         if ai_result:
             decision, reason = ai_result
             should_open = decision == "OPEN"
-            
+
             # Automatically send messages to other agents in certain situations
             await self._send_notification_messages(room, state, decision, reason)
-            
+
             return should_open, f"AI: {reason}"
-        
+
         logger.warning("AI did not provide a decision. Skipping blind state change.")
         return None
-    
+
     async def _send_notification_messages(self, room: dict, state: dict, decision: str, reason: str):
         """Sends notification messages to other agents when appropriate."""
         external_temp = state.get("externalTemperature", 20.0)
         room_temp = room.get("temperatureSensor", {}).get("temperature") if room.get("temperatureSensor") else None
         room_name = room.get("name", "Unknown")
-        
+
         # If closing blinds due to high temperature, inform HeatingAgent
         if decision == "CLOSED" and external_temp > 28.0:
             message = f"Closed blinds in {room_name} due to high external temperature ({external_temp:.1f}°C) for heat protection."
             await self.send_message("HeatingAgent", message, "INFORM")
-        
+
         # If opening blinds for natural light and temperature is high, suggest reducing heating
         elif decision == "OPEN" and "day" in reason.lower() and room_temp and room_temp > 23.0:
             message = f"Opened blinds in {room_name} for natural light. Room temperature is {room_temp:.1f}°C - consider reducing heating."
             await self.send_message("HeatingAgent", message, "INFORM")
-    
+
     async def _check_and_process_messages(self):
         """Checks for new messages and processes them."""
         import time
         current_time = time.time()
-        
+
         # Check messages periodically
         if current_time - self.last_message_check >= self.message_check_interval:
             self.last_message_check = current_time
             messages = await self.get_messages()
-            
+
             if messages:
                 for message in messages:
                     if message.get("to") == self.agent_id or message.get("to") == "broadcast":
-                        logger.info(f"📨 Received message from {message.get('from', '?')}: {message.get('content', '')[:100]}")
+                        logger.info(
+                            f"📨 Received message from {message.get('from', '?')}: {message.get('content', '')[:100]}")
                         await self._process_message(message)
-    
+
+    async def _ask_ai_for_message(self, prompt: str, rooms_list: list[str]) -> Optional[tuple[str, str, Optional[str]]]:
+        """Asks AI for decision based on message. Returns (decision, reason, room_name) where room_name can be None for all rooms."""
+        if not self.use_ai:
+            return None
+
+        system_prompt = f"""You are the expert in energy management and comfort in office buildings. 
+CRITICAL: Answer in EXACTLY this format on a SINGLE LINE: DECISION - REASON - ROOM
+
+Where:
+- DECISION is OPEN or CLOSED
+- REASON is a short explanation (max 30 characters, no colons)
+- ROOM is the EXACT room name from this list: {', '.join(rooms_list) if rooms_list else 'ALL'}
+If the message applies to all rooms or doesn't specify a room, use "ALL" for ROOM.
+
+Examples:
+- "CLOSED - night safety - Sala 208"
+- "OPEN - day people - ALL"
+- "CLOSED - user request - Sala 208"
+
+DO NOT use multi-line format. DO NOT use colons. Use ONLY dashes to separate parts."""
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.ollama_base_url}/api/chat",
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "options": {"temperature": 0.3},
+                        "stream": False
+                    },
+                    timeout=30.0
+                )
+                response.raise_for_status()
+
+                # Parse response
+                text = response.text.strip()
+                try:
+                    result = response.json()
+                    ai_response = result["message"]["content"].strip()
+                except Exception:
+                    lines = text.split('\n')
+                    last_line = lines[-1] if lines else text
+                    try:
+                        result = json.loads(last_line)
+                        ai_response = result["message"]["content"].strip()
+                    except Exception:
+                        ai_response = text.strip()
+                        if ai_response.startswith('{'):
+                            import re
+                            match = re.search(r'"content"\s*:\s*"([^"]+)"', ai_response)
+                            if match:
+                                ai_response = match.group(1).strip()
+
+            # Parse response - handle both formats:
+            # 1. Single line: "DECISION - REASON - ROOM"
+            # 2. Multi-line: "DECISION\nREASON: ...\nROOM: ..."
+
+            # Remove everything after "OR"
+            if "\n\nOR\n\n" in ai_response.upper() or "\nOR\n" in ai_response.upper():
+                ai_response = ai_response.split("\n\nOR\n\n")[0].split("\nOR\n")[0]
+
+            # Split into lines
+            lines = [line.strip() for line in ai_response.split('\n') if line.strip()]
+
+            # Try single-line format first: "DECISION - REASON - ROOM"
+            if " - " in ai_response and len(lines) == 1:
+                parts = [p.strip() for p in ai_response.split(" - ")]
+                if len(parts) >= 1:
+                    decision_str = parts[0].upper()
+                    if "OPEN" in decision_str and "CLOSED" not in decision_str:
+                        decision = "OPEN"
+                        reason = parts[1] if len(parts) >= 2 else "day, people present"
+                        room_name = parts[2] if len(parts) >= 3 and parts[2].upper() != "ALL" else None
+                        if len(reason) > 30:
+                            reason = reason[:30].strip()
+                        return (decision, reason, room_name)
+                    elif "CLOSED" in decision_str:
+                        decision = "CLOSED"
+                        reason = parts[1] if len(parts) >= 2 else "night, safety"
+                        room_name = parts[2] if len(parts) >= 3 and parts[2].upper() != "ALL" else None
+                        if len(reason) > 30:
+                            reason = reason[:30].strip()
+                        return (decision, reason, room_name)
+
+            # Multi-line format: parse each line
+            decision = None
+            reason = None
+            room_name = None
+
+            for line in lines:
+                line_upper = line.upper()
+
+                # Find decision
+                if decision is None:
+                    if "OPEN" in line_upper and "CLOSED" not in line_upper:
+                        decision = "OPEN"
+                        # Check if reason is on same line
+                        if " - " in line:
+                            parts = line.split(" - ", 1)
+                            if len(parts) > 1:
+                                reason = parts[1].strip()
+                    elif "CLOSED" in line_upper:
+                        decision = "CLOSED"
+                        # Check if reason is on same line
+                        if " - " in line:
+                            parts = line.split(" - ", 1)
+                            if len(parts) > 1:
+                                reason = parts[1].strip()
+
+                # Find reason
+                if reason is None and ("REASON:" in line_upper or "REASON" in line_upper):
+                    if ":" in line:
+                        reason = line.split(":", 1)[1].strip()
+                    elif " - " in line:
+                        reason = line.split(" - ", 1)[1].strip()
+
+                # Find room
+                if room_name is None and ("ROOM:" in line_upper or "ROOM" in line_upper):
+                    if ":" in line:
+                        room_candidate = line.split(":", 1)[1].strip()
+                        if room_candidate.upper() != "ALL":
+                            room_name = room_candidate
+                    elif " - " in line:
+                        room_candidate = line.split(" - ", 1)[1].strip()
+                        if room_candidate.upper() != "ALL":
+                            room_name = room_candidate
+
+            # If room not found explicitly, try to find it in the response text
+            if room_name is None and rooms_list:
+                response_lower = ai_response.lower()
+                for room in rooms_list:
+                    if room.lower() in response_lower:
+                        room_name = room
+                        break
+
+            # If still no room found, check if any line looks like a room name
+            if room_name is None and rooms_list:
+                for line in lines:
+                    line_clean = line.strip()
+                    # Skip lines that are clearly not room names
+                    if any(keyword in line_clean.upper() for keyword in
+                           ["DECISION", "REASON", "OPEN", "CLOSED", "ALL", "-", ":"]):
+                        continue
+                    # Check if line matches a room name
+                    for room in rooms_list:
+                        if room.lower() == line_clean.lower() or room.lower() in line_clean.lower():
+                            room_name = room
+                            break
+                    if room_name:
+                        break
+
+            # Set defaults if missing
+            if decision is None:
+                logger.warning(f"Could not parse decision from AI response: {ai_response[:100]}")
+                return None
+
+            if reason is None:
+                reason = "day, people present" if decision == "OPEN" else "night, safety"
+
+            # Clean up reason
+            if "Reason:" in reason:
+                reason = reason.split("Reason:")[0].strip()
+            if len(reason) > 30:
+                reason = reason[:30].strip()
+
+            # Log for debugging
+            logger.debug(f"Raw AI response: {ai_response[:200]}")
+            logger.debug(f"Parsed AI response: decision={decision}, reason={reason}, room={room_name}")
+
+            return (decision, reason, room_name)
+        except Exception as e:
+            logger.error(f"Error querying Ollama: {e}")
+            logger.debug(f"Response from Ollama: {response.text[:200] if 'response' in locals() else 'N/A'}")
+            return None
+
     async def _process_message(self, message: dict):
         """Processes a received message using AI."""
         from_agent = message.get("from", "?")
         content = message.get("content", "")
         message_type = message.get("type", "INFORM")
-        
+
         # Get current state
         state = await self.get_state()
         if not state:
             return
-        
+
+        # Get list of rooms with blinds
+        rooms = state.get("rooms", [])
+        rooms_with_blinds = [r for r in rooms if r.get("blinds")]
+        rooms_list = [r.get("name", "?") for r in rooms_with_blinds]
+
         # Create prompt for message processing
         prompt = f"""You are a window blinds management agent. You received a message from another agent.
 
@@ -432,83 +620,112 @@ CURRENT ENVIRONMENT:
 - External temperature: {state.get('externalTemperature', 20.0)}°C
 - Daylight intensity: {state.get('daylightIntensity', 1.0):.2f}
 - Power outage: {state.get('powerOutage', False)}
-- Rooms with blinds: {len([r for r in state.get('rooms', []) if r.get('blinds')])}
+- Available rooms with blinds: {', '.join(rooms_list) if rooms_list else 'none'}
 
-Analyze the message and decide if you should:
-1. Change blinds state based on the message
-2. Send a response message back
+Analyze the message and decide:
+1. What action to take (OPEN or CLOSE blinds)
+2. Which room(s) this applies to:
+   - If the message mentions a specific room (e.g., "room 208", "Sala 208", "208"), use that exact room name from the list above
+   - If the message applies to all rooms or doesn't specify, use "ALL"
+3. The reason for the decision
 
 If the message is about high temperature or heat protection, you might need to CLOSE blinds.
 If the message is about low temperature or heating, you might need to OPEN blinds for natural light.
 
-Answer in format: DECISION - REASON
-Where DECISION is OPEN or CLOSED, and REASON references the message.
-Example: "CLOSED - high temp from HeatingAgent" or "OPEN - heating request"."""
+CRITICAL: Answer in EXACTLY this format on a SINGLE LINE: DECISION - REASON - ROOM
+Where:
+- DECISION is OPEN or CLOSED
+- REASON is a short explanation (max 30 characters, no colons, no commas if possible)
+- ROOM is the EXACT room name from the list above, or "ALL" if it applies to all rooms
+
+DO NOT use multi-line format. DO NOT use colons. Use ONLY dashes to separate parts.
+
+Examples (all on single lines):
+- "CLOSED - night safety - Sala 208" (if message says "close blinds in room 208" or "zamknij rolety w sali 208")
+- "OPEN - day people - ALL" (if message is general)
+- "CLOSED - high temp - Biuro 101" (if message mentions specific room)
+- "CLOSED - user request - Sala 208" (if user asks to close blinds in specific room)"""
 
         # Ask AI for decision based on message
-        ai_result = await self._ask_ai(prompt)
-        
+        ai_result = await self._ask_ai_for_message(prompt, rooms_list)
+
         if ai_result:
-            decision, reason = ai_result
+            decision, reason, room_name = ai_result
             should_open = decision == "OPEN"
-            
-            # Apply decision to all rooms with blinds
-            rooms = state.get("rooms", [])
-            for room in rooms:
+
+            logger.info(f"AI decision: {decision}, reason: {reason}, room: {room_name if room_name else 'ALL'}")
+
+            # Find target room(s)
+            if room_name:
+                # Find specific room
+                target_rooms = [r for r in rooms_with_blinds if r.get("name", "").lower() == room_name.lower()]
+                if not target_rooms:
+                    logger.warning(f"Room '{room_name}' not found. Available rooms: {', '.join(rooms_list)}")
+                    return
+                logger.info(f"Applying decision to specific room: {room_name}")
+            else:
+                # Apply to all rooms
+                target_rooms = rooms_with_blinds
+                logger.info(f"Applying decision to all rooms ({len(target_rooms)} rooms)")
+
+            # Apply decision to target room(s)
+            for room in target_rooms:
                 blinds = room.get("blinds")
                 if not blinds:
                     continue
-                
+
                 blinds_id = blinds.get("id", "")
                 current_state = blinds.get("state", "CLOSED")
                 current_open = current_state == "OPEN"
-                
+
                 if should_open and not current_open:
                     success = await self.set_blinds(blinds_id, "OPEN")
                     if success:
-                        logger.info(f"⬆ OPENED {blinds_id} in {room.get('name', '?')} (message from {from_agent}: {reason})")
+                        logger.info(
+                            f"⬆ OPENED {blinds_id} in {room.get('name', '?')} (message from {from_agent}: {reason})")
                 elif not should_open and current_open:
                     success = await self.set_blinds(blinds_id, "CLOSED")
                     if success:
-                        logger.info(f"⬇ CLOSED {blinds_id} in {room.get('name', '?')} (message from {from_agent}: {reason})")
-    
+                        logger.info(
+                            f"⬇ CLOSED {blinds_id} in {room.get('name', '?')} (message from {from_agent}: {reason})")
+
     async def run_cycle(self):
         """One cycle of agent operation."""
         # Check for messages first
         await self._check_and_process_messages()
-        
+
         state = await self.get_state()
         if not state:
             return
-        
+
         rooms = state.get("rooms", [])
-        
+
         for room in rooms:
             room_name = room.get("name", "?")
             blinds = room.get("blinds")
-            
+
             if not blinds:
                 continue
-            
+
             blinds_id = blinds.get("id", "")
             current_state = blinds.get("state", "CLOSED")
             current_open = current_state == "OPEN"
-            
+
             # Regular decision cycle (messages are already processed in _check_and_process_messages)
             decision = await self.should_blinds_be_open(room, state)
-            
+
             if decision is None:
                 # AI did not provide a decision - skipping
                 continue
-            
+
             should_be_open, reason = decision
-            
+
             # Open blinds
             if should_be_open and not current_open:
                 success = await self.set_blinds(blinds_id, "OPEN")
                 if success:
                     logger.info(f"⬆ OPENED {blinds_id} in {room_name} ({reason})")
-            
+
             # Close blinds
             elif not should_be_open and current_open:
                 success = await self.set_blinds(blinds_id, "CLOSED")
@@ -518,31 +735,33 @@ Example: "CLOSED - high temp from HeatingAgent" or "OPEN - heating request"."""
             else:
                 logger.info(f"Blinds {blinds_id} in {room_name} are already in the desired state ({reason})")
 
+
 async def main():
     """Main function."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="WindowBlindsAgentAI - blinds agent with AI (Ollama)")
     parser.add_argument("simulator_url", nargs="?", default="http://localhost:8080",
-                       help="Simulator URL (default: http://localhost:8080)")
+                        help="Simulator URL (default: http://localhost:8080)")
     parser.add_argument("--ollama-base-url", type=str, default="http://localhost:11434",
-                       help="Ollama base URL (default: http://localhost:11434)")
+                        help="Ollama base URL (default: http://localhost:11434)")
     parser.add_argument("--model", type=str, default="llama2",
-                       help="Model Ollama to use (default: llama2)")
-    
+                        help="Model Ollama to use (default: llama2)")
+
     args = parser.parse_args()
-    
+
     agent = BlindsAgentAI(
         simulator_url=args.simulator_url,
         ollama_base_url=args.ollama_base_url,
         use_ai=True,
         model=args.model
     )
-    
+
     try:
         await agent.start()
     except KeyboardInterrupt:
         agent.stop()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
